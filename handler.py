@@ -4,6 +4,12 @@ import botocore                         #Boto exceptions
 import time                             #Time manipulations
 import json                             #Json handling
 import logging                          #Basic logger
+import os                               #File operations
+
+
+class EC2ETLErrorException(Exception):
+    """Raised when EC@ ETL operations fail"""
+    pass
 
 def configure_logger():
     logging.basicConfig(format='%(asctime)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S', level=logging.INFO)
@@ -19,6 +25,10 @@ def write_region_json_to_file(region, sorted_instances):
 def read_region_json_from_file(filename):
     with open(filename) as json_file:
         return json.load(json_file)
+
+def delete_region_json_file(region):
+    filename = get_region_json_filename(region)
+    os.remove(filename)
 
 def sanitize_instance_time(instance, key):
     try:
@@ -78,7 +88,7 @@ def transform_ec2_data(json_ec2_list, region):
     sorted_instances.sort(key=lambda k: k['epoch_seconds'], reverse=False)
 
     for instance in sorted_instances:
-        logging.debug("\tSorted Instance Id '{}'  Launched at {}".format(instance["InstanceId"], instance["LaunchTime"]))
+        logging.info("\tSorted Instance Id '{}'  Launched at {}".format(instance["InstanceId"], instance["LaunchTime"]))
 
     return sorted_instances
 
@@ -97,12 +107,17 @@ def ec2_etl(region):
 
     except botocore.exceptions.NoRegionError as ex:
         logging.error (ex)
+        raise EC2ETLErrorException
     except (AttributeError, ValueError, KeyError) as ex: 
         logging.error ("Error parsing AWS response for  region {}: {}".format(region,ex))
+        raise EC2ETLErrorException
     except (TypeError, IndexError,NameError) as ex: 
         logging.error ("Internal error handling AWS response for region {}: {}".format(region, ex))
+        raise EC2ETLErrorException
     except (IOError) as ex: 
-        logging.error ("Failed to load region {} data: {}".format(region, ex))
+        logging.error ("Failed to load region {} data: {}, removing its file to avoid partial results".format(region, ex))
+        delete_region_json_file(region)
+        raise EC2ETLErrorException
 
 def ec2_data_retrieve(region):
     try:
@@ -118,16 +133,22 @@ def ec2_data_retrieve(region):
 def main():
     configure_logger()
 
-    try: 
+    try:         
         regions_filename = "regions.txt"
         regions_file = open(regions_filename, 'r') 
-        Lines = regions_file.readlines() 
-        for line in Lines: 
+        lines = regions_file.readlines()
+
+        for line in lines: 
             region = line.strip()
-            logging.info("Listing EC2 instances in region {}...".format(line.strip())) 
-            ec2_etl(region)
+            try:
+                logging.info("Listing EC2 instances in region {}...".format(line.strip())) 
+                ec2_etl(region)
+            except (EC2ETLErrorException) as ex: 
+                logging.error ("Failed to ETL EC2 data from region {}, shit happens, continue to the next region..".format(region))
+
     except (IOError) as ex: 
-        logging.error ("Internal error retrieveing regions list {} file: {}".format(regions_filename))
+        logging.error ("Internal error retrieveing regions list from file: {}".format(regions_filename))
+
 
 if __name__ == "__main__":
     main()
